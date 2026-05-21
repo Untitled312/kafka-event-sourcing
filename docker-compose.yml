@@ -1,0 +1,211 @@
+version: '3.8'
+
+services:
+  postgres-records:
+    image: postgres:15-alpine
+    container_name: audit-postgres-records
+    secrets:
+      - records_db_password
+    environment:
+      POSTGRES_DB: records_db
+      POSTGRES_USER: records_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/records_db_password
+    volumes:
+      - postgres_records_:/var/lib/postgresql/data
+    networks:
+      - audit-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U records_user -d records_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  postgres-audit:
+    image: postgres:15-alpine
+    container_name: audit-postgres-audit
+    secrets:
+      - audit_db_password
+    environment:
+      POSTGRES_DB: audit_db
+      POSTGRES_USER: audit_user
+      POSTGRES_PASSWORD_FILE: /run/secrets/audit_db_password
+    volumes:
+      - postgres_audit_:/var/lib/postgresql/data
+    networks:
+      - audit-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audit_user -d audit_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: audit-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    networks:
+      - audit-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: audit-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    networks:
+      - audit-network
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: audit-backend
+    depends_on:
+      postgres-records:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    secrets:
+      - records_db_password
+    environment:
+      DATABASE_URL_FILE: /run/secrets/records_db_password_url
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: audit-events
+      LOG_LEVEL: INFO
+      PROMETHEUS_MULTIPROC_DIR: /tmp/prometheus
+    volumes:
+      - ./backend/app:/app/app
+    ports:
+      - "8000:8000"
+    networks:
+      - audit-network
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./worker
+      dockerfile: Dockerfile
+    container_name: audit-worker
+    depends_on:
+      postgres-audit:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    secrets:
+      - audit_db_password
+    environment:
+      DATABASE_URL_FILE: /run/secrets/audit_db_password_url
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KAFKA_TOPIC: audit-events
+      KAFKA_GROUP_ID: audit-group
+      LOG_LEVEL: INFO
+    volumes:
+      - ./worker:/app
+    networks:
+      - audit-network
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: audit-prometheus
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    ports:
+      - "9090:9090"
+    networks:
+      - audit-network
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: audit-grafana
+    depends_on:
+      - prometheus
+    secrets:
+      - grafana_admin_password
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD_FILE: /run/secrets/grafana_admin_password
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    ports:
+      - "3000:3000"
+    networks:
+      - audit-network
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: audit-loki
+    volumes:
+      - ./monitoring/loki/local-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - audit-network
+    restart: unless-stopped
+
+  promtail:
+    image: grafana/promtail:2.9.0
+    container_name: audit-promtail
+    depends_on:
+      - loki
+    volumes:
+      - ./monitoring/loki/promtail-config.yaml:/etc/promtail/config.yaml:ro
+      - /var/log:/var/log
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yaml
+    networks:
+      - audit-network
+    restart: unless-stopped
+
+networks:
+  audit-network:
+    driver: bridge
+
+volumes:
+  postgres_records_:
+  postgres_audit_:
+  prometheus_:
+  grafana_:
+  loki_:
+
+secrets:
+  records_db_password:
+    file: ./secrets/records_db_password.txt
+  audit_db_password:
+    file: ./secrets/audit_db_password.txt
+  grafana_admin_password:
+    file: ./secrets/grafana_admin_password.txt
+  records_db_password_url:
+    file: ./secrets/records_db_password_url.txt
+  audit_db_password_url:
+    file: ./secrets/audit_db_password_url.txt
