@@ -1,31 +1,19 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
-import os
-
+from pathlib import Path
 
 class Settings(BaseSettings):
-    database_url_file: Optional[str] = None
-    database_url: Optional[str] = None
+    DATABASE_URL: str
+    KAFKA_BOOTSTRAP_SERVERS: str
+    KAFKA_TOPIC: str = "audit_events"
+    KAFKA_DLQ_TOPIC: str = "audit_dlq"
+    JWT_SECRET_FILE: Path = Path("/run/secrets/jwt_secret")
+    APP_ENV: str = "production"
+    LOG_LEVEL: str = "INFO"
 
     @property
-    def get_database_url(self) -> str:
-        if self.database_url_file and os.path.exists(self.database_url_file):
-            with open(self.database_url_file, 'r') as f:
-                return f.read().strip()
-        if self.database_url:
-            return self.database_url
-        raise ValueError("DATABASE_URL not set and DATABASE_URL_FILE not found")
+    def jwt_secret(self) -> bytes:
+        return self.JWT_SECRET_FILE.read_bytes().strip()
 
-    kafka_bootstrap_servers: str = "kafka:29092"
-    kafka_topic: str = "audit-events"
-
-    log_level: str = "INFO"
-
-    app_name: str = "Audit System Backend"
-    debug: bool = False
-
-    class Config:
-        case_sensitive = False
-
+    model_config = {"env_file": ".env", "env_file_encoding": "utf-8"}
 
 settings = Settings()

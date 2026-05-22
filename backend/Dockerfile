@@ -1,23 +1,24 @@
 FROM python:3.11-slim
- 	
+
+RUN useradd -m -u 1000 appuser && mkdir -p /app /tmp/loki-cache && chown -R appuser:appuser /app /tmp/loki-cache
+
 WORKDIR /app
-	
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-	
+
 COPY requirements.txt .
+
 RUN pip install --no-cache-dir -r requirements.txt
 
-RUN useradd --create-home --shell /bin/bash appuser
+COPY --chown=appuser:appuser ./app ./app
+
 USER appuser
 
-COPY --chown=appuser:appuser app ./app
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" || exit 1
 
-ENV PYTHONPATH=/app
-ENV PYTHONDONTWRITEBYTECODE=1
-ENV PYTHONUNBUFFERED=1
-
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
-
+CMD ["uvicorn", "app.main:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--log-level", "info", \
+     "--access-log", \
+     "--loop", "uvloop", \
+     "--http", "httptools"]
