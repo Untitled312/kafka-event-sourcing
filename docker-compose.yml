@@ -1,0 +1,124 @@
+networks:
+  audit_net:
+    driver: bridge
+    ipam:
+      config: [{ subnet: 172.28.0.0/16 }]
+
+secrets:
+  db_pass: { file: ./secrets/db_pass.txt }
+  jwt_secret: { file: ./secrets/jwt_secret.txt }
+  kafka_sasl_pass: { file: ./secrets/kafka_sasl_pass.txt }
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: audit_db
+      POSTGRES_USER: audit_rw
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_pass
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d
+    secrets: [db_pass]
+    networks: [audit_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U audit_rw -d audit_db"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  kafka:
+    image: apache/kafka:3.8.0
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    ports: ["9092:9092"]
+    volumes: [kafka_data:/var/lib/kafka/data]
+    networks: [audit_net]
+    healthcheck:
+      test: ["CMD-SHELL", "timeout 3 bash -c 'echo > /dev/tcp/localhost/9092' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  api:
+    build: ./backend
+    ports: ["8000:8000"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://audit_rw:${DB_PASS}@postgres:5432/audit_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      KAFKA_TOPIC: audit_events
+      KAFKA_DLQ_TOPIC: audit_dlq
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      APP_ENV: production
+    secrets: [jwt_secret, db_pass]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy 
+    networks: [audit_net]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports: ["9090:9090"]
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prom_data:/prometheus
+    networks: [audit_net]
+
+  loki:
+    image: grafana/loki:latest
+    ports: ["3100:3100"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml
+      - loki_data:/loki
+    networks: [audit_net]
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    volumes:
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./promtail/config.yml:/etc/promtail/config.yml:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks: [audit_net]
+    depends_on: [loki]
+    
+  grafana:
+    image: grafana/grafana:latest
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./prometheus/prometheus.yml:/etc/grafana/provisioning/datasources/prom.yml
+    depends_on: [prometheus, loki]
+    networks: [audit_net]
+
+volumes:
+  pg_data: {}
+  kafka_data: {}
+  prom_data: {}
+  loki_data: {}
+  grafana_data: {}
