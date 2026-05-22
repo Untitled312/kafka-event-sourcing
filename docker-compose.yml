@@ -4,12 +4,10 @@ services:
   postgres-records:
     image: postgres:15-alpine
     container_name: audit-postgres-records
-    secrets:
-      - records_db_password
     environment:
       POSTGRES_DB: records_db
       POSTGRES_USER: records_user
-      POSTGRES_PASSWORD_FILE: /run/secrets/records_db_password
+      POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
       - postgres_records_:/var/lib/postgresql/data
     networks:
@@ -23,12 +21,10 @@ services:
   postgres-audit:
     image: postgres:15-alpine
     container_name: audit-postgres-audit
-    secrets:
-      - audit_db_password
     environment:
       POSTGRES_DB: audit_db
       POSTGRES_USER: audit_user
-      POSTGRES_PASSWORD_FILE: /run/secrets/audit_db_password
+      POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
       - postgres_audit_:/var/lib/postgresql/data
     networks:
@@ -81,10 +77,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
-    secrets:
-      - records_db_password
     environment:
-      DATABASE_URL_FILE: /run/secrets/records_db_password_url
+      DATABASE_URL: postgresql://records_user@postgres-records:5432/records_db
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TOPIC: audit-events
       LOG_LEVEL: INFO
@@ -107,10 +101,8 @@ services:
         condition: service_healthy
       kafka:
         condition: service_healthy
-    secrets:
-      - audit_db_password
     environment:
-      DATABASE_URL_FILE: /run/secrets/audit_db_password_url
+      DATABASE_URL: postgresql://audit_user@postgres-audit:5432/audit_db
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
       KAFKA_TOPIC: audit-events
       KAFKA_GROUP_ID: audit-group
@@ -145,12 +137,6 @@ services:
     container_name: audit-grafana
     depends_on:
       - prometheus
-    secrets:
-      - grafana_admin_password
-    environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD_FILE: /run/secrets/grafana_admin_password
-      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-simple-json-datasource
     volumes:
       - grafana_:/var/lib/grafana
       - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
@@ -197,15 +183,3 @@ volumes:
   prometheus_:
   grafana_:
   loki_:
-
-secrets:
-  records_db_password:
-    file: ./secrets/records_db_password.txt
-  audit_db_password:
-    file: ./secrets/audit_db_password.txt
-  grafana_admin_password:
-    file: ./secrets/grafana_admin_password.txt
-  records_db_password_url:
-    file: ./secrets/records_db_password_url.txt
-  audit_db_password_url:
-    file: ./secrets/audit_db_password_url.txt
